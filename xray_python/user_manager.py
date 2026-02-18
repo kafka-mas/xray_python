@@ -1,40 +1,41 @@
-import grpc, uuid, base64
+import grpc
 import logging
-from google.protobuf.json_format import MessageToDict
+import uuid
+import base64
+
 from email_validator import validate_email, EmailNotValidError
+
+from google.protobuf.json_format import MessageToDict
+from google.protobuf.message import DecodeError
+
+from app.proxyman.command.command_pb2_grpc import HandlerServiceStub
 
 from app.proxyman.command.command_pb2 import AddUserOperation, RemoveUserOperation, AlterInboundRequest, GetInboundUserRequest
 from common.protocol.user_pb2 import User
 from common.serial.typed_message_pb2 import TypedMessage
 from proxy.vless.account_pb2 import Account
 
-from app.proxyman.command.command_pb2_grpc import HandlerServiceStub
 
+########################
+### НАСТРОИТЬ ЛОГГЕР ###
+########################
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.DEBUG)
 
-
-class XRayServer:
-    def __init__(self, *, address: str = "localhost", port: int = 10085):   # проверка на валидность адреса
-        self.__channel = grpc.insecure_channel(f"{address}:{port}")
-        self.__client = HandlerServiceStub(self.__channel)
-
-    def __enter__(self):
-        return self
+class UserManager:
+    def __init__(self, channel: grpc.Channel):
+        self._client = HandlerServiceStub(channel)
     
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        return False
-
     def __create_account_typed_message(self, uid: str) -> TypedMessage:
-        account = Account(id = uid, flow = 'xtls-rprx-vision', encryption = 'none')
-        return TypedMessage(type = 'xray.proxy.vless.Account', value = account.SerializeToString())
+        account = Account(id=uid, flow='xtls-rprx-vision', encryption='none')
+        return TypedMessage(type='xray.proxy.vless.Account', value=account.SerializeToString())
 
     def __create_user_typed_message(self, email: str, account_tm: TypedMessage) -> TypedMessage: 
-        user = User(level = 0, email = email, account = account_tm)
-        add_user = AddUserOperation(user = user)
-        return TypedMessage(type = 'xray.app.proxyman.command.AddUserOperation', value = add_user.SerializeToString())
+        user = User(level=0, email=email, account=account_tm)
+        add_user = AddUserOperation(user=user)
+        return TypedMessage(type='xray.app.proxyman.command.AddUserOperation', value=add_user.SerializeToString())
 
-    def __is_email_strict(self, email) -> bool:
+    def __is_email_strict(self, email) -> tuple[bool, str]:
         try:
             valid = validate_email(email)
             normalized_email = valid.email.lower()
@@ -49,7 +50,7 @@ class XRayServer:
             return False
         return True
 
-    def create_user(self, email: str, *, uid: str = None, tag: str = "main-inbound") -> dict:
+    def create(self, email: str, *, uid: str = None, tag: str = "main-inbound") -> dict:
         email_checked = self.__is_email_strict(email)
         if not email_checked[0]:
             raise ValueError(f"Wrong email address {email}!!!")
@@ -66,9 +67,9 @@ class XRayServer:
             logging.exception(f"Failed to create protobuf messages for {email}, uid {uid}")
             raise
 
-        alter_inbound_request = AlterInboundRequest(tag = tag, operation = user_typed_message)
+        alter_inbound_request = AlterInboundRequest(tag=tag, operation=user_typed_message)
         try:
-            self.__client.AlterInbound(alter_inbound_request)
+            self._client.AlterInbound(alter_inbound_request)
             logging.info(f'Created user.  Email: {email}.  UUID: {uid}')
             return {"UUID": uid, "email": email}
         except grpc.RpcError as e:
@@ -76,11 +77,12 @@ class XRayServer:
             raise
         except Exception as e:
             logging.exception(f"Unexpected error in create_user: {e}")
+            raise
     
-    def get_users(self, /, tag: str = "main-inbound", *, email: str = None) -> dict:
+    def get(self, /, tag: str = "main-inbound", *, email: str = None) -> dict:
         try:
-            users_request = GetInboundUserRequest(tag = tag, email = email)
-            response = self.__client.GetInboundUsers(users_request)
+            users_request = GetInboundUserRequest(tag=tag, email=email)
+            response = self._client.GetInboundUsers(users_request)
         except grpc.RpcError as e:
             logging.warning(f"Can't get user(s): {e}")
             return {}
@@ -101,24 +103,27 @@ class XRayServer:
                     acc_dict = MessageToDict(acc)
                     # Заменяем base64-строку на словарь
                     account_info['value'] = acc_dict
-                except (base64.binascii.Error, Exception) as e:
+                except (base64.binascii.Error, DecodeError) as e:
                 # Логируем проблему для конкретного пользователя и оставляем поле как есть или ставим None
                     logging.warning(f"Failed to decode/parse account for user {user.get('email', 'unknown')}: {e}")
                     account_info['value'] = None
+                except Exception as e:
+                    logging.error(f"Unexpected error: {e}")
+                    raise e
 
         return response_dict
     
-    def remove_user(self, email: str, /, tag: str = "main-inbound") -> None:
+    def remove(self, email: str, /, tag: str = "main-inbound") -> None:
         email_checked = self.__is_email_strict(email)
         if not email_checked[0]:
             raise ValueError(f"Wrong email address {email}!!!")
         email = email_checked[1]
 
         try:
-            remove_user = RemoveUserOperation(email = email)
-            remove_user_typed_message = TypedMessage(type = 'xray.app.proxyman.command.RemoveUserOperation', value = remove_user.SerializeToString())
-            alter_inbound_request = AlterInboundRequest(tag = tag, operation = remove_user_typed_message)
-            self.__client.AlterInbound(alter_inbound_request)
+            remove_user = RemoveUserOperation(email=email)
+            remove_user_typed_message = TypedMessage(type='xray.app.proxyman.command.RemoveUserOperation', value=remove_user.SerializeToString())
+            alter_inbound_request = AlterInboundRequest(tag=tag, operation=remove_user_typed_message)
+            self._client.AlterInbound(alter_inbound_request)
             logging.info(f"Removed user {email}.")
         except grpc.RpcError as e:
             if e.code() == grpc.StatusCode.UNKNOWN and "not found" in e.details().lower():

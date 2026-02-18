@@ -5,6 +5,6 @@ package_dir = os.path.dirname(__file__)
 if package_dir not in sys.path:
     sys.path.insert(0, package_dir)
 
-from .python_xray import XRayServer
+from .Server import Server
 
-__all__ = ['XRayServer']
+__all__ = ['Server']

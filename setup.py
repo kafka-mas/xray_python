@@ -1,8 +1,8 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="xray_python",
-    version="0.0.1",
+    name="xray-python",
+    version="0.1.0",
     description="Python API для управления пользователями Xray",
     author="Kafka",
     author_email="kafka_mas@disroot.org",
